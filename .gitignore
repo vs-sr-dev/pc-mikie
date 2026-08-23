@@ -1,0 +1,13 @@
+# Regenerable or non-distributable artefacts
+rom/
+disasm/
+trace/
+analysis/
+assets/
+ref/
+build/
+src/gen/
+*.zip
+__pycache__/
+*.pyc
+*.log
