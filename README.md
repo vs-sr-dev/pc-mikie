@@ -68,15 +68,15 @@ MC6809 decoder and cycle table; the trace-diff method applies to any MAME-suppor
 
 Included:
 - `tools/` — analysis, decoding, recompilation and verification tooling (Python + MAME Lua)
+- `src/` — the host runtime the generated code links against, written from scratch:
+  memory map, flag and ALU helpers, vblank/IRQ scheduling, and the video hardware
 - `docs/` — the hardware reference and the write-up
 
 Not included, and not distributable from here:
 - the ROM set — supply your own `mikie.zip`
 - extracted graphics, palettes or text
-- `src/gen/mikie_gen.c`, the recompiled output — it is a translation of copyrighted code
-- the host runtime (`m6809_rt.h`, `mikie_main.c`), which is original but out of scope for a
-  docs-and-tools repository; its interface is specified in
-  [docs/03-transpiler.md](docs/03-transpiler.md#the-runtime-contract)
+- `src/gen/mikie_gen.c`, the recompiled output — it is a translation of copyrighted code,
+  and it is produced on your machine from your own ROM by `tools/transpile.py`
 
 You will also need a MAME build (0.287 or near) and `unidasm` from the same source tree.
 
@@ -91,9 +91,14 @@ rom/          extracted ROM files + maincpu.bin (64K image, program mapped at $6
 disasm/       unidasm output
 trace/        MAME traces and derived coverage data
 analysis/     static analysis output
-src/          your runtime; src/gen/ receives the generated C
+src/          the runtime (shipped); src/gen/ receives the generated C
 build/
 ```
+
+`rom/maincpu.bin` is a 64K image with the three program ROMs placed at their board
+addresses (`n14.11c` at `$6000`, `o13.12a` at `$8000`, `o17.12d` at `$C000`) and the rest
+zero-filled. The graphics ROMs and PROMs are read individually from `rom/` by the video
+code, under their MAME filenames.
 
 ```sh
 # 0. extract the ROMs and build the 64K program image yourself
@@ -121,9 +126,18 @@ gcc -O1 -Isrc -DMIKIE_TRACE -o build/mikie_trace.exe \
 MIKIE_TRACE_SECS=13.5 mame mikie -rompath . -debug -debugger none \
      -autoboot_delay 0 -autoboot_script tools/trace.lua -seconds_to_run 14 \
      -video none -sound none -nothrottle -skip_gameinfo
-./build/mikie_trace.exe rom/maincpu.bin 4300000 > trace/ours.log 2> trace/ours.err
+./build/mikie_trace rom/maincpu.bin 4300000 > trace/ours.log 2> trace/ours.err
 python tools/difftrace.py
+
+# 7. compare a rendered frame against a MAME snapshot of the SAME frame number
+MIKIE_SNAP_FRAMES=1818 mame mikie -rompath . -autoboot_delay 0      -autoboot_script tools/snap_frame.lua -seconds_to_run 31      -video none -sound none -nothrottle -skip_gameinfo      -snapshot_directory ref/frames
+MIKIE_DUMP_FRAME=1818 ./build/mikie rom/maincpu.bin
+python tools/compare_frame.py trace/frame.raw ref/frames/mikie/0000.png
 ```
+
+Comparing at an exact frame number rather than "about the same time" matters: the
+recompiled code is cycle-accurate, so the two should agree pixel for pixel, and any
+mismatch is a real rendering bug rather than a timing artefact.
 
 Graphics extraction (tiles, sprites, the two-stage indirect palette) is in
 `tools/gfxdecode.py`; it reproduces MAME's `gfx_layout` decoding generically.
@@ -141,7 +155,7 @@ Graphics extraction (tiles, sprites, the two-stage indirect palette) is in
 | Cycle timing | **verified**, counter included |
 | Vblank IRQ and `CWAI` | **verified**, 124 interrupts |
 | Memory map and I/O | verified as far as boot and attract exercise it |
-| Video renderer | graphics decoded; renderer not written |
+| Video renderer | written: two-pass tilemap, 36 sprites, indirect palette, ROT270 |
 | Audio (Z80 + 2× SN76489A) | not started |
 
 ---
