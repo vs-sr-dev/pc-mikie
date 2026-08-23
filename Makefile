@@ -7,12 +7,17 @@
 #     python tools/transpile.py
 
 CC      ?= gcc
-CFLAGS  ?= -O2 -Isrc -Wall
+# -O1 deliberately. cpu_run() is one function of ~82,000 lines with ~12,800
+# computed-goto labels; GCC 15 at -O2 was still going after 26 minutes of CPU
+# and 17 GB resident, while -O1 finishes in about 6 minutes. If you want -O2,
+# split the generated code into several functions sharing the dispatch table
+# first.
+CFLAGS  ?= -O1 -Isrc -Wall
 GEN      = src/gen/mikie_gen.c
 SRC      = src/mikie_main.c src/mikie_video.c
 
-# One giant function with ~12,800 labels is hard on the optimiser: expect
-# several minutes. Use OPT=-O1 (or -O0) while iterating.
+# Expect several minutes either way. Use CFLAGS=-O0 while iterating on the
+# runtime; the generated file dominates the build time regardless.
 all: build/mikie
 
 build/mikie: $(GEN) $(SRC) src/m6809_rt.h src/mikie_video.h

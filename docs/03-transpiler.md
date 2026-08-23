@@ -60,9 +60,18 @@ sites cost nothing.
 | compile time | ~6.5 min with `gcc -O1` |
 | binary | 4.6 MB |
 
-The compile time is the one real ergonomic cost: 12 801 labels with computed goto in a
-single function is hard on the compiler. If it becomes annoying, split into several
-functions sharing the dispatch table.
+Compile time is the one real ergonomic cost, and it is worth being specific about it:
+12 801 computed-goto labels in a single function is genuinely hard on the optimiser.
+
+**Do not use `-O2`.** GCC 15 was still working after **26 minutes of CPU time and 17 GB
+resident** on this file, with no end in sight; `-O1` finishes in about six minutes. The
+generated code is mostly straight-line loads, stores and flag updates, so the higher
+optimisation level has little to win in the first place — nearly all of it goes into
+whole-function analyses that scale badly with label count.
+
+If `-O2` matters to you, split the generated code into several functions sharing the
+dispatch table first. Nothing in the design prevents that: only the `goto` edges are
+function-local, and those can fall back to `DISPATCH` across a split.
 
 ---
 
