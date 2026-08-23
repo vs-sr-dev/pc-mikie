@@ -5,6 +5,10 @@
  */
 #include "m6809_rt.h"
 #include "mikie_video.h"
+#include "mikie_sound.h"
+#ifdef MIKIE_SDL
+#include "mikie_host.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -58,10 +62,27 @@ void mem_write(uint16_t a, uint8_t v)
     if (a < 0x0100)                 { RAM0[a] = v; return; }
     if (a >= 0x2800 && a < 0x4000)  { WORK[a - 0x2800] = v; return; }
     if (a >= 0x6000)                return;              /* ROM: ignore */
-    if (a >= 0x2000 && a <= 0x2007) { ls259[a - 0x2000] = v & 1; return; }
+    if (a >= 0x2000 && a <= 0x2007) {
+        /* The LS259 only pulses an output when the bit actually changes, so
+           SOUNDON has to be edge-detected: a 0 -> 1 there is what interrupts
+           the sound Z80. */
+        int bit = a - 0x2000, s = v & 1;
+        if (ls259[bit] != s) {
+            ls259[bit] = (uint8_t)s;
+            if (bit == 2 && s) { sound_run_to(cpu_cycles); sound_irq_w(1); }
+        }
+        return;
+    }
     if (a == 0x2100)                return;              /* watchdog */
     if (a == 0x2200)                { palettebank = v & 7; return; }
-    if (a == 0x2400)                { soundlatch = v; return; }
+    if (a == 0x2400)                {
+        /* the sound board must not see the new command before the cycle the
+           main CPU wrote it at */
+        sound_run_to(cpu_cycles);
+        sound_latch_w(v);
+        soundlatch = v;
+        return;
+    }
 }
 
 /* the IRQ mask is LS259 output 7 */
@@ -125,12 +146,33 @@ void cpu_wait_irq(void)
 static long      dump_frame = -1;
 static const char *dump_path = "trace/frame.raw";
 static int       video_ready;
+static long      run_frames;        /* MIKIE_RUN_FRAMES: stop after this many */
+
+static void sound_pump(void);
+
+#ifdef MIKIE_SDL
+static int host_ready;
+static void host_serve(const uint8_t *rgb);
+#endif
 
 void vbl_frame_hook(void)
 {
     static uint8_t rgb[OUT_W * OUT_H * 3];
     FILE *f;
-    if (dump_frame < 0 || !video_ready) return;
+
+    sound_pump();
+    if (run_frames && (long)vbl_frame > run_frames) exit(0);
+    if (!video_ready) return;
+
+#ifdef MIKIE_SDL
+    if (host_ready) {
+        video_render(WORK + 0x0000, WORK + 0x1000, WORK + 0x1400,
+                     palettebank, ls259[6], rgb);
+        host_serve(rgb);
+        return;
+    }
+#endif
+    if (dump_frame < 0) return;
     if ((long)(vbl_frame - 2) != dump_frame) return;    /* MAME frame N = edge N+1 */
 
     video_render(WORK + 0x0000,          /* sprite RAM at $2800 */
@@ -146,6 +188,113 @@ void vbl_frame_hook(void)
     exit(0);
 }
 
+/* ------------------------------------------------------------- front end
+ *
+ * The board is paced by the sound device, not by a timer: its clock is the
+ * only one in the machine that cannot be argued with, and letting the queue
+ * length steer the emulation keeps audio and video locked to each other for
+ * free. If there is no sound device we fall back to a wall-clock deadline.
+ *
+ * The display is deliberately NOT vsynced. The screen runs at 60.59 Hz, which
+ * is nobody's refresh rate; syncing to the monitor would mean dropping or
+ * repeating one frame every few seconds.
+ */
+#ifdef MIKIE_SDL
+#define AUDIO_HIGH_WATER  (SOUND_RATE * 2 / 60)     /* about two frames */
+
+static void host_serve(const uint8_t *rgb)
+{
+    static unsigned epoch, deadline;
+    static uint64_t frames_shown;
+    int guard = 0;
+
+    host_frame(rgb);
+    host_inputs(&in_system, &in_p1, &in_p2);
+    if (host_should_quit()) exit(0);
+
+    if (host_audio_running()) {
+        while (host_audio_queued() > AUDIO_HIGH_WATER && guard++ < 500)
+            host_sleep(1);
+    } else {
+        /* No sound device: fall back to the clock. The deadline is computed
+           from the frame index rather than added up frame by frame, because a
+           frame lasts 16.5 ms and rounding that to whole milliseconds every
+           time would run 3 % fast. */
+        unsigned now = host_ticks();
+        if (!epoch || now < epoch || now - epoch > frames_shown * 20 + 1000) {
+            epoch = now;
+            frames_shown = 0;
+        }
+        frames_shown++;
+        deadline = epoch + (unsigned)(frames_shown * VBL_NUM * 1000ULL
+                                      / (VBL_DEN * 1536000ULL));
+        while (host_ticks() < deadline && guard++ < 500) host_sleep(1);
+    }
+}
+#endif
+
+/* -------------------------------------------------------------- audio out
+ *
+ * The sound board is caught up once per frame and, if MIKIE_WAV is set, the
+ * samples it produces are written out. The sample count is derived from the
+ * 6809 cycle counter rather than accumulated per frame, so it cannot drift.
+ */
+static FILE   *wav;
+static uint64_t samples_out;      /* samples handed to the outputs so far */
+
+static void wav_close(void)
+{
+    uint32_t n;
+    if (!wav) return;
+    n = (uint32_t)(samples_out * 2);
+    fseek(wav, 40, SEEK_SET); fwrite(&n, 4, 1, wav);
+    n += 36;
+    fseek(wav, 4, SEEK_SET);  fwrite(&n, 4, 1, wav);
+    fclose(wav);
+    wav = NULL;
+}
+
+static void wav_open(const char *path)
+{
+    static const uint8_t hdr[44] = {
+        'R','I','F','F', 0,0,0,0, 'W','A','V','E', 'f','m','t',' ',
+        16,0,0,0, 1,0, 1,0,
+        (uint8_t)(SOUND_RATE & 0xFF), (uint8_t)((SOUND_RATE >> 8) & 0xFF),
+        (uint8_t)((SOUND_RATE >> 16) & 0xFF), (uint8_t)(SOUND_RATE >> 24),
+        (uint8_t)((SOUND_RATE * 2) & 0xFF), (uint8_t)(((SOUND_RATE * 2) >> 8) & 0xFF),
+        (uint8_t)(((SOUND_RATE * 2) >> 16) & 0xFF), (uint8_t)((SOUND_RATE * 2) >> 24),
+        2,0, 16,0, 'd','a','t','a', 0,0,0,0
+    };
+    wav = fopen(path, "wb");
+    if (!wav) { fprintf(stderr, "cannot write %s\n", path); exit(5); }
+    fwrite(hdr, 1, sizeof hdr, wav);
+    atexit(wav_close);
+}
+
+static void sound_pump(void)
+{
+    static int16_t buf[4096];
+    long want;
+    int  live = 0;
+
+    sound_run_to(cpu_cycles);
+#ifdef MIKIE_SDL
+    live = host_ready;
+#endif
+    if (!wav && !live) return;
+    want = (long)(cpu_cycles * SOUND_RATE / 1536000 - samples_out);
+    while (want > 0) {
+        int n = (want > 4096) ? 4096 : (int)want;
+        sound_render(buf, n);
+        if (wav) fwrite(buf, 2, (size_t)n, wav);
+#ifdef MIKIE_SDL
+        if (live) host_audio(buf, n);
+#endif
+        samples_out += (unsigned)n;
+        want -= n;
+    }
+}
+
 /* ----------------------------------------------------------------- trap */
 void cpu_unknown_pc(uint16_t pc)
 {
@@ -154,6 +303,34 @@ void cpu_unknown_pc(uint16_t pc)
             pc, r_a, r_b, r_x, r_y, r_u, r_s, r_dp, r_cc);
     exit(3);
 }
+
+/* ------------------------------------------------- tracing the sound Z80
+ *
+ * MIKIE_Z80_SKIP   start logging at this Z80 cycle (a full run from reset
+ *                  would be gigabytes; tools/diffz80.py aligns on the state,
+ *                  so the exact starting point does not matter)
+ * MIKIE_Z80_LIMIT  stop after this many instructions
+ */
+#ifdef MIKIE_Z80_TRACE
+#include "z80.h"
+static uint64_t z80_skip;
+static long     z80_limit, z80_count;
+
+void z80_trace_hook(const z80_t *z)
+{
+    if (z->cycles < z80_skip) return;
+    printf("AF=%02X%02X BC=%02X%02X DE=%02X%02X HL=%02X%02X "
+           "IX=%02X%02X IY=%02X%02X SP=%04X "
+           "AF2=%02X%02X BC2=%02X%02X DE2=%02X%02X HL2=%02X%02X "
+           "I=%02X R=%02X IM=%X IFF1=%X HALT=%X CYC=%llu\n%04X\n",
+           z->a, z->f, z->b, z->c, z->d, z->e, z->h, z->l,
+           z->ixh, z->ixl, z->iyh, z->iyl, z->sp,
+           z->a2, z->f2, z->b2, z->c2, z->d2, z->e2, z->h2, z->l2,
+           z->i, z->r, z->im, z->iff1, z->halt,
+           (unsigned long long)z->cycles, z->pc);
+    if (z80_limit && ++z80_count >= z80_limit) { fflush(stdout); exit(0); }
+}
+#endif
 
 /* ------------------------------------------------------------- tracing */
 #ifdef MIKIE_TRACE
@@ -205,7 +382,30 @@ int main(int argc, char **argv)
             else { fprintf(stderr, "video_init failed\n"); return 1; }
         }
     }
+#ifdef MIKIE_Z80_TRACE
+    if (getenv("MIKIE_Z80_SKIP"))  z80_skip  = strtoull(getenv("MIKIE_Z80_SKIP"), 0, 10);
+    if (getenv("MIKIE_Z80_LIMIT")) z80_limit = atol(getenv("MIKIE_Z80_LIMIT"));
+#endif
+    if (getenv("MIKIE_RUN_FRAMES")) run_frames = atol(getenv("MIKIE_RUN_FRAMES"));
+    if (sound_init(getenv("MIKIE_ROM_DIR") ? getenv("MIKIE_ROM_DIR") : "rom"))
+        return 1;
+    if (getenv("MIKIE_WAV")) wav_open(getenv("MIKIE_WAV"));
+#ifdef MIKIE_SDL
+    /* dumping a frame is a batch job: it must not open a window */
+    if (dump_frame < 0) {
+        const char *romdir = getenv("MIKIE_ROM_DIR");
+        if (video_init(romdir ? romdir : "rom")) {
+            fprintf(stderr, "video_init failed\n");
+            return 1;
+        }
+        video_ready = 1;
+        if (host_init(OUT_W, OUT_H, SOUND_RATE)) return 1;
+        atexit(host_shutdown);
+        host_ready = 1;
+    }
+#endif
     cpu_reset();
+    sound_reset();
     cpu_run();
     return 0;
 }

@@ -3,9 +3,9 @@
 Static recompilation of Konami's **Mikie** (1984, arcade) from MC6809 machine code to
 portable C — with every instruction verified against MAME.
 
-> **4 026 322 instructions from reset with PC, all eight registers and the cycle counter
-> identical to MAME, across 124 vblank interrupts — and 13 of 13 rendered frames
-> pixel-identical across the whole attract loop.**
+> **4 026 322 6809 instructions and 3 063 129 Z80 instructions matching MAME exactly —
+> PC, every register and the cycle counter — with 13 of 13 rendered frames pixel-identical
+> across the whole attract loop, and audio within 0.2 % RMS of MAME's own recording.**
 
 This repository holds the **tools and the documentation**. It contains no ROM data, no
 extracted graphics and no generated code. See [Scope](#scope) below.
@@ -59,6 +59,8 @@ The reference lied twice, too, in ways that looked like success. Both are writte
 | [03-transpiler.md](docs/03-transpiler.md) | the 6809 → C code generation model and the details that bite |
 | [04-verification.md](docs/04-verification.md) | the MAME harness, deriving the cycle table, measuring interrupt latency |
 | [05-porting-gotchas.md](docs/05-porting-gotchas.md) | a checklist of what is easy to get wrong |
+| [06-sound.md](docs/06-sound.md) | the sound board: Z80 timing rules, the two PSGs, resampling, tracing a second CPU |
+| [07-front-end.md](docs/07-front-end.md) | pacing on the sound device, why not to vsync a 60.59 Hz board |
 
 Much of this is not Mikie-specific. `tools/m6809.py` is a complete, independently verified
 MC6809 decoder and cycle table; the trace-diff method applies to any MAME-supported target.
@@ -72,7 +74,8 @@ MC6809 decoder and cycle table; the trace-diff method applies to any MAME-suppor
 Included:
 - `tools/` — analysis, decoding, recompilation and verification tooling (Python + MAME Lua)
 - `src/` — the host runtime the generated code links against, written from scratch:
-  memory map, flag and ALU helpers, vblank/IRQ scheduling, and the video hardware
+  memory map, flag and ALU helpers, vblank/IRQ scheduling, the video hardware, the sound
+  board (a complete Z80 core and the two PSGs) and the SDL2 front end
 - `docs/` — the hardware reference and the write-up
 
 Not included, and not distributable from here:
@@ -121,9 +124,17 @@ python tools/verify_decoder.py
 # 4. recompile
 python tools/transpile.py            # -> src/gen/mikie_gen.c
 
-# 5. build (needs GCC or Clang: the dispatch table uses label-as-value)
+# 5. build (needs GCC or Clang: the dispatch table uses label-as-value).
+#    The generated file is the entire build time - several minutes - so it is
+#    compiled once on its own and everything else is relinked against it.
+make                    # build/mikie; `make build/mikie_sdl` for the playable one
+#    or by hand:
+gcc -O1 -Isrc -c src/gen/mikie_gen.c -o build/mikie_gen.o
+gcc -O1 -Isrc -o build/mikie.exe build/mikie_gen.o src/mikie_main.c src/mikie_video.c \
+    src/z80.c src/sn76489.c src/mikie_sound.c
 gcc -O1 -Isrc -DMIKIE_TRACE -o build/mikie_trace.exe \
-    src/gen/mikie_gen.c src/mikie_main.c
+    src/gen/mikie_gen.c src/mikie_main.c src/mikie_video.c \
+    src/z80.c src/sn76489.c src/mikie_sound.c
 
 # 6. verify against MAME, instruction by instruction
 MIKIE_TRACE_SECS=13.5 mame mikie -rompath . -debug -debugger none \
@@ -136,7 +147,33 @@ python tools/difftrace.py
 MIKIE_SNAP_FRAMES=1818 mame mikie -rompath . -autoboot_delay 0      -autoboot_script tools/snap_frame.lua -seconds_to_run 31      -video none -sound none -nothrottle -skip_gameinfo      -snapshot_directory ref/frames
 MIKIE_DUMP_FRAME=1818 ./build/mikie rom/maincpu.bin
 python tools/compare_frame.py trace/frame.raw ref/frames/mikie/0000.png
+
+# 8. verify the sound CPU the same way. MIKIE_Z80_SKIP is in Z80 cycles: pick a value
+#    just below the first CYC in MAME's log, the differ aligns on state from there.
+MIKIE_TRACE_SKIP=23 MIKIE_TRACE_SECS=2.5 MIKIE_Z80_OUT=trace/audiocpu.log \
+  mame mikie -rompath . -debug -debugger none -autoboot_delay 0 \
+      -autoboot_script tools/trace_z80.lua -seconds_to_run 26 \
+      -video none -sound none -nothrottle -skip_gameinfo
+gcc -O1 -Isrc -DMIKIE_Z80_TRACE -o build/mikie_z80trace.exe build/mikie_gen.o \
+    src/mikie_main.c src/mikie_video.c src/z80.c src/sn76489.c src/mikie_sound.c
+MIKIE_Z80_SKIP=82320000 MIKIE_Z80_LIMIT=1200000 ./build/mikie_z80trace.exe rom/maincpu.bin \
+    > trace/z80_ours.log
+python tools/diffz80.py trace/audiocpu.log trace/z80_ours.log
+
+# 9. compare forty seconds of audio against MAME's own recording
+MIKIE_WAV=trace/ours.wav MIKIE_RUN_FRAMES=2424 ./build/mikie.exe rom/maincpu.bin
+mame mikie -rompath . -seconds_to_run 40 -video none -sound none \
+     -wavwrite trace/mame.wav -nothrottle -skip_gameinfo -autoboot_delay 0
 ```
+
+To actually play it, build the SDL front end (`make build/mikie_sdl`) and run it:
+
+```sh
+./build/mikie_sdl rom/maincpu.bin
+```
+
+`5` inserts a coin, `1` starts, arrows and left Ctrl play, `F11` is fullscreen, `Esc`
+quits. The keys follow MAME's defaults on purpose.
 
 Comparing at an exact frame number rather than "about the same time" matters: the
 recompiled code is cycle-accurate, so the two should agree pixel for pixel, and any
@@ -159,7 +196,9 @@ Graphics extraction (tiles, sprites, the two-stage indirect palette) is in
 | Vblank IRQ and `CWAI` | **verified**, 124 interrupts |
 | Memory map and I/O | verified as far as boot and attract exercise it (30.5 s) |
 | Video renderer | **verified**, 13/13 frames pixel-identical |
-| Audio (Z80 + 2× SN76489A) | not started |
+| Z80 sound CPU | **verified**, 3.06 M instructions over four windows |
+| Audio (2× SN76489A) | **verified** against MAME's own recording, 0.2 % RMS |
+| Real-time output and input | **working** — SDL2, paced by the sound device |
 
 ---
 
