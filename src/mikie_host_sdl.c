@@ -125,7 +125,7 @@ void host_inputs(uint8_t *system, uint8_t *p1, uint8_t *p2)
     LOW(a, 0x04, SDL_SCANCODE_UP);
     LOW(a, 0x08, SDL_SCANCODE_DOWN);
     LOW(a, 0x10, SDL_SCANCODE_LCTRL);        /* button 1 */
-    LOW(a, 0x20, SDL_SCANCODE_LALT);         /* button 2 */
+    LOW(a, 0x20, SDL_SCANCODE_LALT);         /* button 2 - the head butt */
 
     /* Player two shares the same stick on an upright cabinet, which is what
        DSW3 is set to; the port is read anyway, so keep it idle. */

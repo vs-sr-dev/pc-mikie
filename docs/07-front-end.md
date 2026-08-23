@@ -58,6 +58,11 @@ arrows  player 1 joystick      LCtrl / LAlt   buttons 1 and 2
 F11     fullscreen             Esc     quit
 ```
 
+In Mikie the head butt is on **button 2**, so the key that attacks is Alt, not Ctrl. The
+bits are MAME's, so that is true there too - worth writing down, because "the fire button
+does nothing" is the first thing anyone concludes instead.
+
+
 The ports are active low, exactly as the board reads them, so the front end hands back
 `0xFF` with a bit cleared per pressed key and the memory map needs no translation layer.
 

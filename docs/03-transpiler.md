@@ -1,6 +1,6 @@
 # The transpiler: 6809 → C
 
-`tools/transpile.py` turns the 12 801 instructions found by the static analysis into a
+`tools/transpile.py` turns the 13 078 instructions found by the static analysis into a
 single C file. This is the design and the details that took measurement to get right.
 
 ---
@@ -54,14 +54,14 @@ sites cost nothing.
 
 | | |
 |---|---|
-| instructions translated | 12 801 |
+| instructions translated | 13 078 |
 | traps emitted | 13 (all in data regions never executed) |
-| generated C | 81 925 lines, 2.2 MB |
+| generated C | 83 684 lines, 2.2 MB |
 | compile time | ~6.5 min with `gcc -O1` |
 | binary | 4.6 MB |
 
 Compile time is the one real ergonomic cost, and it is worth being specific about it:
-12 801 computed-goto labels in a single function is genuinely hard on the optimiser.
+13 078 computed-goto labels in a single function is genuinely hard on the optimiser.
 
 **Do not use `-O2`.** GCC 15 was still working after **26 minutes of CPU time and 17 GB
 resident** on this file, with no end in sight; `-O1` finishes in about six minutes. The

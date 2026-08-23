@@ -36,7 +36,7 @@ resolved jump tables, seeded with every PC the trace confirmed.
 | data (tables, text, level layouts) | 11 298 | 27.6 % |
 | padding (`$00` / `$FF` runs) | 1 377 | 3.4 % |
 
-**12 801 instructions, 616 functions.**
+**13 078 instructions, 616 functions.**
 
 ### Largest non-code blocks
 `$F157-$FDA5` (3151 B) · `$E800-$EF67` (1896 B) · `$D42E-$DAFE` (1745 B) ·
@@ -104,7 +104,8 @@ few instructions earlier:
 6246: JSR    [A,X]
 ```
 
-**59 of 64 resolve statically.** Two things were needed to get there.
+**62 of 64 resolve statically.** Four things were needed to get there, and the last two
+were only found by a human playing the game.
 
 ### Bound each table by the next base
 Tables are packed contiguously. Reading entries "while the value looks like a valid code
@@ -118,17 +119,71 @@ visited. When a trace seed drops the walker into the middle of a block, the `LDU
 before it was never seen. A backward scan over the linear predecessor chain — stopping at
 the first block boundary or redefinition of the register — recovers those.
 
-### The five that cannot resolve statically
+### Scan the flow graph, not the listing
+The base is not always an immediate. It can be read out of a table of its own:
+
+```
+91C6: LDU  #$DC0C          ; the table of handlers
+91CA: LDY  A,U             ; pick one
+  ...
+91F8: JSR  ,Y
+```
+
+Following that needs two things the linear scan does not have.
+
+*An exact test for "does this instruction redefine the register".* Checking the mnemonic
+stops on a `TFR B,A` that cannot touch Y. Decode the postbyte of `TFR`/`EXG` and the
+bitmask of `PULS`/`PULU` instead.
+
+*Predecessors, not the previous address.* The dispatch loop puts a `BRA` between the load
+and the use, and an unconditional jump really is a boundary walking backwards. Use the
+xrefs already collected. Then a second problem appears: the loop's own back edge arrives
+through a `PULS B,X,Y`, which redefines Y. Treating that as failure resolves nothing, so a
+path that redefines the register is dropped as *no information* rather than fatal. What is
+still refused is two paths disagreeing, or a path that loads the register some other way —
+either would be a guess, and a guessed base recompiles whichever bytes happen to be there.
+
+### Collect every base, not the first one
+This is the one that hurt. Dispatchers are shared:
+
+```
+80AD: LDY  #$DA2D          ; one caller's table
+80B1: JMP  $8303
+  ...
+8303: PSHS B / LDA -$E,X / ASLA
+8308: JSR  [A,Y]           ; serves both
+```
+
+with another caller arriving at `$8303` with `$DA3B`. Taking the first base found
+recompiled ten handlers and silently dropped seven — and the site counted as *resolved*, so
+nothing in the report suggested a problem. Collect all the bases that can reach the site
+and take the union of their tables: `$8308` has **17** entries, not 10.
+
+Proof that the missing seven were real code: `$80B4`, `$8107`, `$81C3` and `$8238` were
+four of the largest blocks the analysis had been listing as *non-code runs*.
+
+### The two that cannot resolve statically
 | site | form | why |
 |---|---|---|
-| `$AD4C` | `JMP [$29B6]` | soft vector held in RAM |
-| `$91F8` | `JSR ,Y` | computed jump |
-| `$72B5` | `JMP ,Y` | computed jump |
-| `$DE91`, `$DE99` | — | false positives inside data |
+| `$AD4C` | `JMP [$29B6]` | soft vector held in RAM — undecidable by construction |
+| `$72B5` | `JMP ,Y` | Y supplied by the caller |
 
-None of them are a problem: the generated code routes *all* indirect control flow through a
-runtime dispatch table anyway, and traps on any address that was never recompiled. Static
-resolution is an optimisation and a coverage aid, not a correctness requirement.
+### Coverage is a correctness requirement, not an optimisation
+
+It is tempting to write that missing entries are harmless because the generated code traps
+on any address that was never recompiled. The trap is a crash. Twice, the game ran through
+its whole attract loop, passed a four-million-instruction diff against MAME, and then died
+in the first minute of actual play: once on the first press of the attack button
+(collision handlers), once walking into the corridor after level one (movement handlers).
+
+Thirty seconds of attract executes 4 561 instructions out of 13 078 recompiled. **Two
+thirds of the port is inference**, and reachability is undecidable, so some of it will be
+wrong. `analysis/extra_entries.txt` exists for that: one hex address per line with a note
+saying how it was found, fed back in as an entry point. The trap prints the address and
+says so.
+
+The metric that mattered was never "how many sites did I resolve". It was "how many paths
+reach this site, and did I look at all of them".
 
 ---
 

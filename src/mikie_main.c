@@ -301,6 +301,12 @@ void cpu_unknown_pc(uint16_t pc)
     fprintf(stderr, "\n*** address was never recompiled: $%04X "
                     "(A=%02X B=%02X X=%04X Y=%04X U=%04X S=%04X DP=%02X CC=%02X)\n",
             pc, r_a, r_b, r_x, r_y, r_u, r_s, r_dp, r_cc);
+    /* Reachability is undecidable, and this game dispatches through pointers
+       its callers supply, so the static analysis can miss an entry point that
+       nothing in the attract loop ever reaches either. Recovery is mechanical
+       rather than mysterious, which is why the address is worth printing. */
+    fprintf(stderr, "    add it to analysis/extra_entries.txt, then re-run "
+                    "tools/analyze.py and tools/transpile.py\n");
     exit(3);
 }
 

@@ -81,7 +81,33 @@ for musical timing. Derive it from emulated Z80 cycles, not from host time.
 
 ---
 
+## Coverage
+
+### The attract loop is not the game
+Static recompilation only translates what the analysis can prove is code, and a trace of
+the attract mode executes 4 561 instructions out of 13 078. Everything else is inference.
+The port passed a four-million-instruction diff against MAME, rendered thirteen frames
+pixel-identically, matched the reference audio to 0.2 % — and then died in the first minute
+of play, twice: on the first press of the attack button, and again walking into the
+corridor after level one. Both were dispatch tables the attract mode never uses.
+
+Budget for this. Play the game before believing the numbers, keep the "address was never
+recompiled" trap loud, and keep a file of entry points discovered at runtime, because
+reachability is undecidable and some of them will only ever be found by playing.
+
+### A resolved jump table can still be half a jump table
+Worse than an unresolved site, because nothing reports it. If two callers set up different
+tables and jump to a shared dispatcher, taking the first base the scan finds resolves the
+site, translates one caller's handlers and drops the other's. Collect every base that
+reaches the site and take the union. See [02-static-analysis.md](02-static-analysis.md).
+
+---
+
 ## Input and options
+
+### The head butt is button 2
+Not button 1. Ctrl does nothing visible and Alt attacks, on MAME's default keys and
+therefore on any port that maps the bits faithfully. Easy to mistake for broken input.
 
 ### Four-way stick
 Not eight-way. On a modern pad the four-way restriction has to be imposed or the controls

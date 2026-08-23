@@ -8,7 +8,7 @@
 #     python tools/transpile.py
 
 CC      ?= gcc
-# -O1 deliberately. cpu_run() is one function of ~82,000 lines with ~12,800
+# -O1 deliberately. cpu_run() is one function of ~84,000 lines with ~13,100
 # computed-goto labels; GCC 15 at -O2 was still going after 26 minutes of CPU
 # and 17 GB resident, while -O1 finishes in about 6 minutes. If you want -O2,
 # split the generated code into several functions sharing the dispatch table

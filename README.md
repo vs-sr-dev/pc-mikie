@@ -172,8 +172,9 @@ To actually play it, build the SDL front end (`make build/mikie_sdl`) and run it
 ./build/mikie_sdl rom/maincpu.bin
 ```
 
-`5` inserts a coin, `1` starts, arrows and left Ctrl play, `F11` is fullscreen, `Esc`
-quits. The keys follow MAME's defaults on purpose.
+`5` inserts a coin, `1` starts, arrows move and **left Alt** is the head butt (button 2,
+not button 1 - Ctrl does nothing visible). `F11` is fullscreen, `Esc` quits. The keys
+follow MAME's defaults on purpose.
 
 Comparing at an exact frame number rather than "about the same time" matters: the
 recompiled code is cycle-accurate, so the two should agree pixel for pixel, and any

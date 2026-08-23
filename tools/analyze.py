@@ -81,6 +81,138 @@ def table_entries(base, limit=64):
         a += 2
     return out
 
+_TFR_REG = {0: 'D', 1: 'X', 2: 'Y', 3: 'U', 4: 'S', 5: 'PC',
+            8: 'A', 9: 'B', 10: 'CC', 11: 'DP'}
+_PULL_BIT = {'CC': 0x01, 'A': 0x02, 'B': 0x04, 'DP': 0x08,
+             'X': 0x10, 'Y': 0x20, 'U': 0x40, 'S': 0x40, 'PC': 0x80}
+
+def clobbers(ins, reg):
+    """Does this instruction write `reg`? Being exact about TFR and PULS is
+    what makes the backward scan usable: a coarse "any TFR ends the search"
+    test stops one instruction short of the LDY that matters, because the
+    dispatch loop happens to do a TFR B,A on the way past."""
+    mn = ins.mnem
+    if mn in ('LD' + reg, 'LEA' + reg, 'CLR' + reg):
+        return True
+    if mn in ('TFR', 'EXG') and ins.operand is not None:
+        hi = _TFR_REG.get((ins.operand >> 4) & 0xF)
+        lo = _TFR_REG.get(ins.operand & 0xF)
+        return lo == reg or (mn == 'EXG' and hi == reg)
+    if mn in ('PULS', 'PULU') and ins.operand is not None:
+        return bool(ins.operand & _PULL_BIT.get(reg, 0))
+    if mn == 'ABX':
+        return reg == 'X'
+    return False
+
+def preds(a):
+    """Instructions that can execute immediately before `a`: the linear one if
+    it falls through, plus everything that branches or jumps here."""
+    out = []
+    for back in range(1, 6):
+        q = a - back
+        if q >= ROM_LO and starts[q] and insns.get(q) is not None \
+           and q + insns[q].length == a \
+           and insns[q].flow not in (M.JUMP, M.RET, M.IND_JUMP):
+            out.append(q)
+            break
+    out.extend(q for q in xrefs.get(a, ()) if insns.get(q) is not None)
+    return out
+
+def backscan_bases(pc, reg, budget=600):
+    """Every table base that can arrive at `pc` in `reg`.
+
+    Returning one base is not enough, because the game shares dispatchers:
+
+        80AD: LDY  #$DA2D          one caller's table
+        80B1: JMP  $8303
+        ...
+        8303: PSHS B / LDA -$E,X / ASLA
+        8308: JSR  [A,Y]           <- serves both
+
+    with another caller arriving with $DA3B. Picking whichever base the scan
+    reached first recompiled ten handlers and silently dropped seven, which is
+    how the game died the moment the player walked into the corridor.
+
+    So: walk the flow graph backwards, gather all of them, and take the union
+    of the tables. A path that redefines the register carries no information
+    and is dropped; a path that loads the register some other way means we
+    would be guessing, and the whole site is abandoned instead.
+    """
+    seen, found = set(), set()
+    q = deque([pc])
+    while q:
+        for prev in preds(q.popleft()):
+            if prev in seen:
+                continue
+            seen.add(prev)
+            budget -= 1
+            if budget <= 0:
+                return set()
+            ins = insns[prev]
+            if ins.mnem == 'LD' + reg:
+                if ins.mode == M.IMM16:
+                    found.add(ins.operand)
+                    continue
+                idx = ins.idx or {}
+                if idx.get('kind') in ('areg', 'breg', 'dreg') and not idx.get('ind'):
+                    b = backscan(prev, idx['reg'])
+                    if b is not None:
+                        found.add(b)
+                    continue
+                return set()
+            if clobbers(ins, reg):
+                continue
+            q.append(prev)
+    return {b for b in found if in_rom(b)}
+
+def backscan_table(pc, reg, budget=400):
+    """The register was not loaded with an immediate but read out of a table:
+
+        LDU  #$DC0C          <- the table of handlers
+        LDY  A,U             <- pick one
+        JSR  ,Y
+
+    Find the LD<reg> <acc>,<base> that filled it, then the immediate that
+    filled <base>. This is how the game dispatches per-object behaviour.
+
+    It has to walk the flow graph backwards, not the linear listing: the real
+    dispatch loop puts a BRA between the two, and a linear scan stops fourteen
+    instructions short of the answer.
+
+    A path that redefines the register is abandoned, not fatal. The loop here
+    ends in PULS B,X,Y, restoring what its own PSHS saved a few instructions
+    earlier, so the back edge always reaches a write to Y that this code cannot
+    see through. Treating that as a failure resolves nothing; treating it as
+    "no information" leaves the one path that does reach the LDY. What is NOT
+    allowed is two paths disagreeing, or a path reaching the register through
+    something other than a table read: either of those would mean guessing, and
+    a guessed base recompiles whichever bytes happen to be there.
+    """
+    seen, found = set(), set()
+    q = deque([pc])
+    while q:
+        for prev in preds(q.popleft()):
+            if prev in seen:
+                continue
+            seen.add(prev)
+            budget -= 1
+            if budget <= 0:
+                return None
+            ins = insns[prev]
+            if ins.mnem == 'LD' + reg:
+                idx = ins.idx or {}
+                if idx.get('kind') not in ('areg', 'breg', 'dreg') or idx.get('ind'):
+                    return None               # loaded some other way: guessing
+                b = backscan(prev, idx['reg'])
+                if b is None:
+                    return None
+                found.add(b)
+                continue                      # this path is answered
+            if clobbers(ins, reg):
+                continue                      # this path tells us nothing
+            q.append(prev)
+    return found.pop() if len(found) == 1 else None
+
 def backscan(pc, reg, maxi=20):
     """Walk back up the linear chain of instructions preceding pc inside the
     same basic block, looking for LD<reg> #immediate. Needed because forward
@@ -158,7 +290,8 @@ def walk(entry, queue):
             base, entries = resolve_indirect(pc, ins, regs)
             seen = set(obs_ind.get(pc, []))
             if base is not None:
-                tables[pc] = {'base': base, 'reg': (ins.idx or {}).get('reg'),
+                tables[pc] = {'base': base, 'bases': [base],
+                              'reg': (ins.idx or {}).get('reg'),
                               'entries': entries, 'observed': sorted(seen)}
                 for t in entries:
                     xrefs[t].add(pc); funcs.add(t); queue.append(t)
@@ -188,34 +321,54 @@ def main():
     seeds = [a for a in range(ROM_LO, ROM_HI) if cov[a]]
     queue.extend(seeds)
 
+    # --- addresses found the hard way.
+    # Reachability is undecidable and this game dispatches through pointers the
+    # caller supplies, so some entry points cannot be proved from the ROM alone
+    # and are never executed during the attract loop either. When the runtime
+    # traps on an address that was never recompiled, put it here and re-run.
+    # Each line: hex address, then why it is known to be code.
+    extra = os.path.join(OUTD, 'extra_entries.txt')
+    n_extra = 0
+    if os.path.exists(extra):
+        for line in open(extra):
+            line = line.split('#')[0].strip()
+            if not line:
+                continue
+            a = int(line.split()[0], 16)
+            if in_rom(a):
+                queue.append(a); funcs.add(a); n_extra += 1
+        print(f'extra entry points  : {n_extra} from {extra}')
+
     while queue:
         walk(queue.popleft(), queue)
 
-    # ---- pass 2: the bases are known now, so re-read the tables with correct
-    #      bounds and retry the still-unresolved indirect jumps using the
-    #      backward scan.
-    KNOWN_BASES.update(t['base'] for t in tables.values())
-    for pc, t in list(tables.items()):
-        t['entries'] = table_entries(t['base'])
+    # ---- pass 2: with the whole flow graph in hand, redo EVERY indirect site
+    #      - resolved ones included, because a site can be reached with more
+    #      than one table and pass 1 only ever recorded the first base it saw.
+    #      Two rounds: adding a base moves where its neighbours are cut off.
     again = deque()
-    for pc in list(unresolved):
-        ins = insns.get(pc)
-        if ins is None:
-            continue
-        idx = ins.idx or {}
-        if idx.get('kind') == 'extind':
-            continue
-        reg = idx.get('reg')
-        base = backscan(pc, reg)
-        if base is not None and in_rom(base):
-            KNOWN_BASES.add(base)
-            tables[pc] = {'base': base, 'reg': reg, 'entries': table_entries(base),
-                          'observed': sorted(obs_ind.get(pc, []))}
-            unresolved.remove(pc)
-            for e in tables[pc]['entries']:
-                xrefs[e].add(pc); funcs.add(e); again.append(e)
-    while again:
-        walk(again.popleft(), again)
+    for _ in range(2):
+        KNOWN_BASES.update(b for t in tables.values() for b in t['bases'])
+        sites = [(pc, (insns[pc].idx or {})) for pc in list(tables) + list(unresolved)
+                 if insns.get(pc) is not None]
+        for pc, idx in sites:
+            if idx.get('kind') == 'extind':      # vector in RAM: not knowable
+                continue
+            reg = idx.get('reg')
+            bases = backscan_bases(pc, reg)
+            if not bases:
+                continue
+            KNOWN_BASES.update(bases)
+            ents = sorted({e for b in bases for e in table_entries(b)})
+            tables[pc] = {'base': min(bases), 'bases': sorted(bases), 'reg': reg,
+                          'entries': ents, 'observed': sorted(obs_ind.get(pc, []))}
+            if pc in unresolved:
+                unresolved.remove(pc)
+            for e in ents:
+                if e not in funcs:
+                    xrefs[e].add(pc); funcs.add(e); again.append(e)
+        while again:
+            walk(again.popleft(), again)
 
     # ---- quality check: overlapping instructions
     overlaps = []
@@ -278,7 +431,9 @@ def main():
     json.dump({'entries': {k: f'{v:04X}' for k, v in entries.items()},
                'n_insns': n_starts, 'n_code_bytes': n_code,
                'functions': sorted(f'{f:04X}' for f in funcs),
-               'tables': {f'{k:04X}': {'base': f'{v["base"]:04X}', 'reg': v['reg'],
+               'tables': {f'{k:04X}': {'base': f'{v["base"]:04X}',
+                                       'bases': [f'{b:04X}' for b in v['bases']],
+                                       'reg': v['reg'],
                                        'entries': [f'{e:04X}' for e in v['entries']],
                                        'observed': [f'{e:04X}' for e in v['observed']]}
                           for k, v in tables.items()},
