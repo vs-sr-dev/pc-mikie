@@ -155,6 +155,59 @@ Both failures produced *plausible* output; neither threw an error.
 
 ---
 
+## Verifying the video
+
+The same idea applies to the screen, with one extra step: comparing at an exact **frame
+number** rather than at an elapsed time. The CPU is cycle-accurate, so the two frames must
+agree pixel for pixel; anything else is a real bug rather than a timing artefact.
+
+`tools/snap_frame.lua` snapshots MAME at given frame indices (it works under `-video none`,
+so video references are headless too), and `tools/compare_frame.py` diffs our raw RGB dump
+against the PNG and writes an ours | MAME | difference strip.
+
+**Result: 13 of 13 frames pixel-identical**, spread across the whole attract loop from the
+boot self-test to the demo game.
+
+### Splitting "wrong renderer" from "wrong data"
+The useful question is not "is the renderer right?" but "given identical rules, did the two
+start from identical data?"
+
+`tools/dump_ram.lua` pulls `$2800-$3FFF` out of MAME at an exact frame, and
+`tools/render_ref.py` renders that in Python and compares it with MAME's own snapshot,
+trying all eight palette banks (the bank is driver state rather than memory, so it is
+recovered by comparison).
+
+Rendering **MAME's own RAM** reproduced MAME's snapshot with **zero differing pixels**. That
+settles the rendering rules in one step, and every remaining difference has to come from the
+data — which is a trace-diff problem, not a graphics problem. Without that split, a rendering
+bug that did not exist would have been an easy thing to hunt for hours.
+
+### The capture point, and a warning about tunable constants
+The screen is drawn at the **end** of the visible period — on the vblank edge that
+*terminates* the frame, before the next frame's handler runs. So MAME's frame N is our edge
+**N+1**, captured at the edge with no offset.
+
+Getting there was instructive. Capturing on the edge that *starts* frame N was wrong, and the
+first fix attempt was a tunable "capture delay" in cycles after the edge. It worked: four
+sample frames went to zero with a delay of 8000 cycles.
+
+It was still the wrong model. Widening from 4 sample frames to 13 exposed one frame, inside
+the boot self-test, that was 27% wrong at any delay under ~16000 — against ~250 for one frame
+and ~600 for another. No constant satisfied all three, and the "correct" value drifted toward
+the end of the frame. That drift *was* the answer.
+
+The delay appeared to work because during normal play the game only touches video memory in
+the vblank handler, so "shortly after edge N" and "at the end of frame N" show the same
+image. The self-test, which writes video RAM continuously, broke the illusion.
+
+> A knob you can tune until the numbers agree is an excellent way to not notice you have
+> misunderstood something. The warning sign was never a failure — it was that the "right"
+> value kept changing.
+
+The knob is gone. The code captures at edge N+1 and needs no calibration.
+
+---
+
 ## Reproducing
 
 ```sh
@@ -172,4 +225,12 @@ gcc -O1 -Isrc -DMIKIE_TRACE -o build/mikie_trace.exe \
 
 # 3. compare
 python tools/difftrace.py
+
+# 4. video: snapshot MAME at exact frame numbers, then diff frame by frame
+MIKIE_SNAP_FRAMES=120,400,700,980,1260,1540,1800 \
+mame mikie -rompath . -autoboot_delay 0 -autoboot_script tools/snap_frame.lua \
+     -seconds_to_run 31 -video none -sound none -nothrottle -skip_gameinfo \
+     -snapshot_directory ref/frames
+MIKIE_DUMP_FRAME=1800 ./build/mikie rom/maincpu.bin
+python tools/compare_frame.py trace/frame.raw ref/frames/mikie/0006.png
 ```

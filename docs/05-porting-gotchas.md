@@ -37,6 +37,12 @@ if you find it by playing rather than by diffing.
 
 ## Video
 
+### The frame is drawn at the END of the visible period
+Not at the start. If you render on the vblank edge that *opens* a frame, you are showing the
+previous frame's content. It looks fine while the game only updates video memory inside the
+vblank handler, and falls apart the moment it does not — the boot self-test writes video RAM
+continuously and exposes it immediately.
+
 ### Vertical screen
 ROT270: 224×256. On PC that means integer scaling plus rotation. On a console with a
 horizontal framebuffer the rotation is manual and costs memory bandwidth — plan for it.

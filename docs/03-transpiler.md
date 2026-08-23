@@ -117,6 +117,26 @@ visible symptom was an `RTS` landing at `$61C7` instead of `$61C5` — **456 ins
 after the actual mistake** — followed later by a trap at `$FE00` with the stack driven up
 into colour RAM. Debugging that by watching the game would have been a bad afternoon.
 
+### Fall-through must be explicit, not positional
+This one is subtle and it cost a long trace to find.
+
+Instructions are emitted in address order, and a `SEQ` instruction was allowed to fall
+through to whatever label came next in the file. That is correct only while the next label
+is the next instruction — and it is not always, because the static analysis can leave a
+**phantom label inside an instruction**: a speculative decode that overlaps a real one.
+
+At `$9104` the real instruction is `A7 88 21` (`STA $21,X`, three bytes). A speculative walk
+had also produced a label at `$9106` for `21 CC` (`BRN`). Falling through in file order sent
+execution to `L_9106`, i.e. **into the middle of an opcode**.
+
+64 instructions were affected, five of them in code the trace confirms is executed
+(`$9104 $9107 $9285 $9594 $9597`). The symptom appeared **6.9 million instructions into a
+trace diff**, as a PC off by one with every register and the cycle counter still matching.
+
+The fix is to emit an explicit `goto` whenever `pc + length` is not the next emitted label.
+`tools/transpile.py` now reports how many it emitted and how many of those are in confirmed
+code, so the hazard is visible at generation time instead of being left for a diff to find.
+
 ### `CWAI` must be implemented, and its interrupt entry still costs 19 cycles
 ```c
 r_cc &= 0xEF; r_cc |= CC_E;

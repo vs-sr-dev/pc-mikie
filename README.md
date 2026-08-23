@@ -4,7 +4,8 @@ Static recompilation of Konami's **Mikie** (1984, arcade) from MC6809 machine co
 portable C — with every instruction verified against MAME.
 
 > **4 026 322 instructions from reset with PC, all eight registers and the cycle counter
-> identical to MAME, across 124 vblank interrupts.**
+> identical to MAME, across 124 vblank interrupts — and 13 of 13 rendered frames
+> pixel-identical across the whole attract loop.**
 
 This repository holds the **tools and the documentation**. It contains no ROM data, no
 extracted graphics and no generated code. See [Scope](#scope) below.
@@ -41,6 +42,8 @@ crash minutes later:
 - the interrupt stacking the wrong return address (symptom appeared 456 instructions later)
 - the `CWAI` path not paying the 19-cycle interrupt entry — **identical PC and registers**,
   only the cycle counter off
+- an instruction falling through into a phantom label *inside another opcode*, which showed
+  up as a PC off by one **6.9 million instructions** into a trace
 
 The reference lied twice, too, in ways that looked like success. Both are written up in
 [docs/04-verification.md](docs/04-verification.md).
@@ -154,8 +157,8 @@ Graphics extraction (tiles, sprites, the two-stage indirect palette) is in
 | MC6809E semantics | **verified**, 4.03 M instructions |
 | Cycle timing | **verified**, counter included |
 | Vblank IRQ and `CWAI` | **verified**, 124 interrupts |
-| Memory map and I/O | verified as far as boot and attract exercise it |
-| Video renderer | written: two-pass tilemap, 36 sprites, indirect palette, ROT270 |
+| Memory map and I/O | verified as far as boot and attract exercise it (30.5 s) |
+| Video renderer | **verified**, 13/13 frames pixel-identical |
 | Audio (Z80 + 2× SN76489A) | not started |
 
 ---

@@ -60,8 +60,12 @@ wrong answer. The useful measurement is not how many there are, but how many are
 
 > Of the 45 remaining overlaps, **zero** have both readings confirmed by the trace.
 
-Nothing in the static analysis contradicts the hardware. The residue is all speculative
-walks into data, and the runtime trap catches any of it that ever executes.
+Nothing in the static analysis contradicts the hardware. But "harmless" was the wrong
+conclusion to draw: a phantom label that is never *jumped to* can still be **fallen into**
+if the code generator lets an instruction fall through to whatever label comes next in the
+file. That bug was real, and it took a trace diff 6.9 million instructions long to surface.
+See [03-transpiler.md](03-transpiler.md) — the generator now makes fall-through explicit
+and reports every instruction with a phantom label inside it.
 
 ---
 

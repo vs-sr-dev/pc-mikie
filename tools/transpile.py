@@ -365,11 +365,12 @@ def main():
     w('    DISPATCH(cpu_entry_pc());')
     w('')
 
+    phantom = []
     irqvec = A.mem[0xFFF8] << 8 | A.mem[0xFFF9]
     w(f'L_IRQVEC: goto L_{irqvec:04X};')
     w('')
 
-    for pc in addrs:
+    for i, pc in enumerate(addrs):
         ins = insns[pc]
         body = g.insn(ins)
         dis = f'{ins.mnem} {ins.mode}'
@@ -385,10 +386,20 @@ def main():
             w(f'    cpu_cycles += {M.cycles(ins)};')
         for line in body:
             w('    ' + line)
-        # natural fall-through to the next instruction
+        # Fall-through must be EXPLICIT whenever the next label in the file is
+        # not the next instruction. The static analysis can leave a phantom
+        # label *inside* an instruction (a speculative decode that overlaps a
+        # real one); falling through in file order would then land mid-opcode.
+        # This actually happened at $9104, and only showed up 6.9M instructions
+        # into a trace diff.
         nxt = (pc + ins.length) & 0xFFFF
-        if ins.flow in (M.SEQ, M.BRANCH, M.CALL) and nxt not in insns:
-            w(f'    DISPATCH(0x{nxt:04X});')
+        phys_next = addrs[i + 1] if i + 1 < len(addrs) else None
+        if ins.flow in (M.SEQ, M.BRANCH, M.CALL) and nxt != phys_next:
+            phantom.append(pc)
+            if nxt in insns:
+                w(f'    goto L_{nxt:04X};')
+            else:
+                w(f'    DISPATCH(0x{nxt:04X});')
     w('')
     w('init_labels:')
     for pc in addrs:
@@ -405,6 +416,14 @@ def main():
     print(f'instructions translated : {len(addrs):,}')
     print(f'traps emitted           : {g.traps}')
     print(f'C lines generated       : {len(o):,}')
+    conf = [a for a in phantom if A.cov[a]]
+    print(f'explicit fall-throughs  : {len(phantom)}   '
+          f'({len(conf)} in code the trace confirms is executed)')
+    if conf:
+        print('   these instructions have a phantom label from an overlapping')
+        print('   decode sitting inside them; falling through in file order')
+        print('   would land mid-opcode:')
+        print('   ' + ' '.join(f'${a:04X}' for a in conf))
     print(f'wrote {path} ({os.path.getsize(path)//1024} KB)')
 
 if __name__ == '__main__':

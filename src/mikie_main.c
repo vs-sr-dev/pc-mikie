@@ -105,10 +105,22 @@ void cpu_wait_irq(void)
 }
 
 /* ------------------------------------------------------- frame dumping
- * Set MIKIE_DUMP_FRAME to a frame index and MIKIE_DUMP_PATH to a file: the
- * renderer writes that frame as a raw OUT_W*OUT_H*3 RGB buffer and exits, so
- * it can be diffed against a MAME snapshot taken at the same frame number
- * (tools/snap_frame.lua + tools/compare_frame.py).
+ *
+ * The screen is drawn at the END of the visible period, that is on the vblank
+ * edge that *terminates* the frame - and before the vblank handler for the
+ * next frame runs. So MAME's frame N is our edge N+1, taken at the edge with
+ * no offset of any kind.
+ *
+ * Worth stating because the obvious alternative is wrong: capturing on the
+ * edge that *starts* frame N shows the frame before it, and no amount of
+ * fudging the capture point inside the frame fixes that in general. It looks
+ * like it does during normal play, when the game only touches video memory in
+ * the vblank handler, and then falls apart during the boot self-test, which
+ * writes video RAM continuously.
+ *
+ * MIKIE_DUMP_FRAME  MAME frame number to capture
+ * MIKIE_DUMP_PATH   output file (raw OUT_W * OUT_H * 3 RGB)
+ * MIKIE_ROM_DIR     directory holding the graphics ROMs and PROMs
  */
 static long      dump_frame = -1;
 static const char *dump_path = "trace/frame.raw";
@@ -119,7 +131,7 @@ void vbl_frame_hook(void)
     static uint8_t rgb[OUT_W * OUT_H * 3];
     FILE *f;
     if (dump_frame < 0 || !video_ready) return;
-    if ((long)(vbl_frame - 1) != dump_frame) return;
+    if ((long)(vbl_frame - 2) != dump_frame) return;    /* MAME frame N = edge N+1 */
 
     video_render(WORK + 0x0000,          /* sprite RAM at $2800 */
                  WORK + 0x1000,          /* colour RAM at $3800 */
@@ -129,7 +141,7 @@ void vbl_frame_hook(void)
     if (!f) { fprintf(stderr, "cannot write %s\n", dump_path); exit(4); }
     fwrite(rgb, 1, sizeof rgb, f);
     fclose(f);
-    fprintf(stderr, "frame %ld written to %s (cycle %llu)\n",
+    fprintf(stderr, "MAME frame %ld -> %s (cycle %llu)\n",
             dump_frame, dump_path, (unsigned long long)cpu_cycles);
     exit(0);
 }

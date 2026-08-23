@@ -139,7 +139,7 @@ static inline uint16_t alu_sub16(uint16_t a, uint16_t m) {
 extern uint64_t vbl_frame;   /* index of the NEXT edge */
 extern uint64_t vbl_next;    /* cycle of the next edge */
 int  vbl_irq_enabled(void);  /* LS259 bit 7, the IRQ mask */
-void vbl_frame_hook(void);   /* called once per frame, after the edge */
+void vbl_frame_hook(void);   /* called once per frame, at the edge */
 
 static inline uint64_t vbl_edge(uint64_t k) {
     return (uint64_t)(((int64_t)(k * VBL_NUM) + VBL_PHASE) / (int64_t)VBL_DEN);
