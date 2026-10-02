@@ -7,5 +7,5 @@
   "targets": [
     "Windows"
   ],
-  "approach": "MC6809 and Z80 to portable C, verified against MAME"
+  "approach": "MC6809 to portable C, the sound board's Z80 emulated, both verified against MAME"
 }
